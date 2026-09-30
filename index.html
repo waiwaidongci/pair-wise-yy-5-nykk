@@ -7,10 +7,11 @@
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; font-family: Arial, "PingFang SC", sans-serif; background: #f3efe7; color: #282018; }
-    header { padding: 18px 24px; background: #fffaf2; border-bottom: 1px solid #d9cdbc; display: flex; justify-content: space-between; gap: 16px; align-items: center; }
+    header { padding: 18px 24px; background: #fffaf2; border-bottom: 1px solid #d9cdbc; display: flex; justify-content: space-between; gap: 16px; align-items: center; flex-wrap: wrap; }
     h1 { margin: 0; font-size: 26px; }
     button { border: 0; border-radius: 8px; padding: 10px 13px; background: #8d3e37; color: #fff; font-weight: 800; cursor: pointer; }
     button.secondary { background: #71675c; }
+    button:disabled { background: #b9aea0; cursor: not-allowed; }
     input, select { width: 100%; border: 1px solid #d9cdbc; border-radius: 6px; padding: 9px; font: inherit; background: #fff; }
     label { display: block; margin: 9px 0 5px; color: #76695e; font-size: 13px; }
     .app { display: grid; grid-template-columns: 280px 1fr 320px; gap: 16px; padding: 16px; }
@@ -27,14 +28,40 @@
     .mini { aspect-ratio: 1; border-radius: 2px; }
     .toolbar { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     .warning { color: #a03a2e; font-weight: 800; }
+    .banner { margin: 0; padding: 10px 24px; background: #fdf3d8; border-bottom: 1px solid #e3cf9d; color: #6b5320; font-weight: 700; }
+    #patchStatus { margin-top: 10px; font-size: 13px; color: #5a4f44; min-height: 18px; }
+    #patchStatus .ok { color: #355b38; font-weight: 800; }
+    #patchStatus .err { color: #a03a2e; font-weight: 800; }
+    .modal { position: fixed; inset: 0; background: rgba(40, 32, 24, .45); display: flex; align-items: center; justify-content: center; z-index: 50; padding: 16px; }
+    .modal[hidden] { display: none; }
+    .modal-box { background: #fffaf2; border: 1px solid #d9cdbc; border-radius: 10px; padding: 18px; max-width: 720px; width: 100%; max-height: 86vh; overflow: auto; }
+    .modal-box h3 { margin: 0 0 8px; }
+    .modal-box h4 { margin: 14px 0 6px; }
+    .modal-actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+    .merge-info { font-size: 13px; color: #5a4f44; }
+    .merge-errors { font-size: 13px; color: #a03a2e; font-weight: 700; margin: 6px 0; }
+    .clean-list { font-size: 13px; color: #5a4f44; max-height: 96px; overflow: auto; border: 1px solid #e1d5c5; border-radius: 6px; padding: 6px; }
+    .conflict { border: 1px solid #d9cdbc; border-radius: 8px; padding: 8px; margin-bottom: 8px; }
+    .conflict .tag { font-size: 12px; font-weight: 800; color: #8d3e37; }
+    .conflict .tag.unknown { color: #6b5320; }
+    .cands { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+    .cand { display: flex; align-items: center; gap: 6px; border: 3px solid #d9cdbc; border-radius: 8px; padding: 4px 8px; background: #fff; cursor: pointer; font-size: 13px; font-weight: 700; color: #282018; }
+    .cand .chip { width: 22px; height: 22px; border-radius: 5px; border: 1px solid #c9bdab; }
+    .cand.picked { border-color: #1f1b16; background: #fdf3d8; }
     @media (max-width: 1000px) { header { display: block; } .app { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
   <header>
     <div><h1>手工织锦纹样排版台</h1><div>绘制经纬网格纹样，统计色线用量并保存方案。</div></div>
-    <div class="toolbar"><button id="saveBtn">保存方案</button><button id="exportBtn" class="secondary">导出JSON</button></div>
+    <div class="toolbar">
+      <button id="saveBtn">保存方案</button>
+      <button id="exportBtn" class="secondary">导出JSON</button>
+      <button id="patchFileBtn" style="display:none">生成补丁文件</button>
+      <button id="patchSendBtn" class="secondary" style="display:none">传回主站</button>
+    </div>
   </header>
+  <p class="banner" id="offlineBanner" hidden>断网工坊 · 离线修改模式：基线版本 v<span id="offlineVer">0</span>，此处改动不会并入主网格，完成后请「生成补丁文件」或「传回主站」。</p>
   <main class="app">
     <aside class="panel">
       <h2>画布</h2>
@@ -49,6 +76,14 @@
         <button data-block="cross" class="secondary">十字</button>
         <button data-block="diamond" class="secondary">小菱形</button>
       </div>
+      <h2>离线补丁</h2>
+      <div class="blocks">
+        <button id="sendOfflineBtn" class="secondary">送去离线工坊</button>
+        <button id="fetchPatchesBtn" class="secondary">取回补丁</button>
+        <button id="importPatchBtn" class="secondary">导入补丁文件</button>
+        <input id="patchFile" type="file" accept="application/json,.json" multiple hidden>
+      </div>
+      <div id="patchStatus"></div>
     </aside>
     <section class="panel"><div class="grid" id="grid"></div></section>
     <aside class="panel">
@@ -63,6 +98,22 @@
       <div id="risk"></div>
     </aside>
   </main>
+  <div class="modal" id="mergeModal" hidden>
+    <div class="modal-box">
+      <h3>离线补丁合并</h3>
+      <div class="merge-info" id="mergeInfo"></div>
+      <div class="merge-errors" id="mergeErrors"></div>
+      <h4>自动并入（版本相同，无冲突）</h4>
+      <div class="clean-list" id="mergeClean"></div>
+      <h4>冲突待选（同一格各留一份，请选择并入的颜色）</h4>
+      <div id="mergeConflicts"></div>
+      <div class="modal-actions">
+        <button id="mergeConfirmBtn" disabled>确认并入</button>
+        <button id="mergeRetryBtn" class="secondary">恢复原图案并重试</button>
+        <button id="mergeCancelBtn" class="secondary">取消</button>
+      </div>
+    </div>
+  </div>
   <script>
     const colors = ["#f7e7c4","#a6322d","#1f5f78","#d6a437","#355b38","#713d7b","#1e1b18","#e98c52"];
     const grid = document.querySelector("#grid");
@@ -70,15 +121,53 @@
     const stats = document.querySelector("#stats");
     const preview = document.querySelector("#preview");
     const risk = document.querySelector("#risk");
+    const patchStatus = document.querySelector("#patchStatus");
+    const isOffline = new URLSearchParams(location.search).get("offline") === "1";
     let cols = 18, rows = 14, active = 1, block = "dot", dragging = false;
     let cells = [];
     let undo = [], redo = [];
+    let version = 0;
+    let versionSnaps = {};   // 版本号 -> 该版本整格快照
+    let baselineCells = null, baselineVersion = 0;  // 离线工坊基线
+    let mergeOrigin = null; // 合并前的原图案，用于失败恢复
+    let mergePatches = [];
+    let conflictChoices = new Map();
+    const SNAP_KEY = "zfl31Versions";
+    const SAVE_KEY = "zfl31Pattern";
+    const OFFLINE_KEY = "zfl31OfflinePattern";
+    const QUEUE_KEY = "zfl31PatchQueue";
+
     function init(loadSaved = true) {
-      const saved = loadSaved && JSON.parse(localStorage.getItem("zfl31Pattern") || "null");
-      if (saved) { cols = saved.cols; rows = saved.rows; cells = saved.cells; }
-      else { cols = Number(document.querySelector("#cols").value); rows = Number(document.querySelector("#rows").value); cells = Array(cols * rows).fill(0); }
+      if (isOffline) {
+        const p = JSON.parse(localStorage.getItem(OFFLINE_KEY) || "null");
+        if (!p) { patchStatus.innerHTML = '<span class="err">未找到离线图案，请从主站「送去离线工坊」。</span>'; return; }
+        cols = p.cols; rows = p.rows; cells = p.cells; version = p.version || 0;
+        baselineVersion = version; baselineCells = [...cells];
+        versionSnaps = {};
+        document.querySelector("#offlineBanner").hidden = false;
+        document.querySelector("#offlineVer").textContent = version;
+        document.querySelector("#saveBtn").style.display = "none";
+        document.querySelector("#exportBtn").style.display = "none";
+        document.querySelector("#patchFileBtn").style.display = "";
+        document.querySelector("#patchSendBtn").style.display = "";
+      } else {
+        const saved = loadSaved && JSON.parse(localStorage.getItem(SAVE_KEY) || "null");
+        if (saved) { cols = saved.cols; rows = saved.rows; cells = saved.cells; version = saved.version || 0; }
+        else { cols = Number(document.querySelector("#cols").value); rows = Number(document.querySelector("#rows").value); cells = Array(cols * rows).fill(0); version = 0; }
+        versionSnaps = JSON.parse(localStorage.getItem(SNAP_KEY) || "null") || {};
+        versionSnaps[version] = [...cells];
+        saveSnaps();
+      }
       document.querySelector("#cols").value = cols; document.querySelector("#rows").value = rows;
       render();
+    }
+    function saveSnaps() { try { localStorage.setItem(SNAP_KEY, JSON.stringify(versionSnaps)); } catch (e) {} }
+    function bumpVersion() {
+      version++;
+      versionSnaps[version] = [...cells];
+      const keys = Object.keys(versionSnaps).map(Number).sort((a, b) => b - a);
+      if (keys.length > 50) keys.slice(50).forEach(k => delete versionSnaps[k]);
+      saveSnaps();
     }
     function render() {
       palette.innerHTML = colors.map((c, i) => '<button class="swatch '+(i===active?'active':'')+'" data-color="'+i+'" style="background:'+c+'"></button>').join("");
@@ -98,6 +187,7 @@
       const targets = pattern(i);
       targets.forEach(t => { if (t >= 0 && t < cells.length) cells[t] = active; });
       render();
+      if (!isOffline) bumpVersion();  // 离线改动只记在补丁里，不动主站版本
     }
     function pattern(i) {
       const x = i % cols, y = Math.floor(i / cols);
@@ -118,15 +208,204 @@
       }
       risk.innerHTML = riskRows.length ? '<p class="warning">第'+riskRows.join("、")+'行换色过密，可能断线。</p>' : '<p>暂无明显断线风险。</p>';
     }
+    function patchChanges() {
+      const changes = {};
+      cells.forEach((c, i) => { if (c !== baselineCells[i]) changes[i] = c; });
+      return changes;
+    }
+    function downloadPatch() {
+      const patch = { kind: "brocade-patch", baseVersion: baselineVersion, changes: patchChanges() };
+      const blob = new Blob([JSON.stringify(patch, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob); a.download = "brocade-patch-v" + baselineVersion + ".json";
+      a.click(); URL.revokeObjectURL(a.href);
+      patchStatus.innerHTML = '<span class="ok">补丁文件已生成（基线 v'+baselineVersion+'，改动 '+Object.keys(patch.changes).length+' 格）。</span>';
+    }
+    function sendPatch() {
+      const patch = { kind: "brocade-patch", baseVersion: baselineVersion, changes: patchChanges() };
+      const q = readQueue();
+      q.push(patch);
+      try { localStorage.setItem(QUEUE_KEY, JSON.stringify(q)); } catch (e) {}
+      patchStatus.innerHTML = '<span class="ok">已传回主站，队列中现有 '+q.length+' 份补丁。</span>';
+    }
+    function readQueue() { try { return JSON.parse(localStorage.getItem(QUEUE_KEY) || "[]"); } catch (e) { return []; } }
+    function writeQueue(q) { try { localStorage.setItem(QUEUE_KEY, JSON.stringify(q)); } catch (e) {} }
+    function validatePatch(p, idx) {
+      const errs = [];
+      if (!p || typeof p !== "object" || p.kind !== "brocade-patch") errs.push("补丁" + (idx + 1) + " 格式不正确（缺少 brocade-patch 标记），已跳过");
+      if (!Number.isInteger(p.baseVersion)) errs.push("补丁" + (idx + 1) + " 缺少基线版本，已跳过");
+      if (!p.changes || typeof p.changes !== "object" || Array.isArray(p.changes)) errs.push("补丁" + (idx + 1) + " 缺少改动格，已跳过");
+      return errs;
+    }
+    // 三路合并：基线版本相同→正常并入；当前格已改或两边都改过→各留一份待选
+    function computeMerge(patches) {
+      const decisions = new Map();  // 格号 -> {color, sources:[补丁序号]}
+      const conflicts = new Map();   // 格号 -> {i, baseColor, candidates:Map<色号, Set<来源>>}
+      const errors = [];
+      patches.forEach((p, pi) => {
+        const baseCells = versionSnaps[p.baseVersion] || null;
+        if (!baseCells) errors.push("补丁" + (pi + 1) + " 基线版本 v" + p.baseVersion + " 的快照已失效，无法判断本地改动，相关格请手动选择");
+        for (const key of Object.keys(p.changes)) {
+          const i = Number(key);
+          if (!Number.isInteger(i) || i < 0 || i >= cells.length) { errors.push("补丁" + (pi + 1) + " 格号 " + key + " 无效，已跳过"); continue; }
+          const color = p.changes[key];
+          if (!Number.isInteger(color) || color < 0 || color >= colors.length) { errors.push("补丁" + (pi + 1) + " 格 " + i + " 色号 " + color + " 无效，已跳过"); continue; }
+          const baseColor = baseCells ? baseCells[i] : null;
+          if (baseColor !== null && color === baseColor) continue;  // 与基线相同的空改动
+          const localColor = cells[i];
+          const localChanged = baseColor !== null && localColor !== baseColor;
+          const ensureConflict = () => {
+            if (!conflicts.has(i)) {
+              conflicts.set(i, { i, baseColor, candidates: new Map() });
+              if (localChanged || baseColor === null) conflicts.get(i).candidates.set(localColor, new Set(["local"]));
+            }
+            return conflicts.get(i);
+          };
+          if (conflicts.has(i)) {
+            const c = conflicts.get(i);
+            if (!c.candidates.has(color)) c.candidates.set(color, new Set());
+            c.candidates.get(color).add("p" + pi);
+          } else if (decisions.has(i)) {
+            const d = decisions.get(i);
+            if (d.color === color) { d.sources.push(pi); continue; }  // 两边改同色，无冲突
+            decisions.delete(i);
+            const c = ensureConflict();
+            if (!c.candidates.has(d.color)) c.candidates.set(d.color, new Set());
+            d.sources.forEach(s => c.candidates.get(d.color).add("p" + s));
+            if (!c.candidates.has(color)) c.candidates.set(color, new Set());
+            c.candidates.get(color).add("p" + pi);
+          } else if (localChanged || baseColor === null) {
+            const c = ensureConflict();
+            c.candidates.set(color, new Set(["p" + pi]));
+          } else {
+            decisions.set(i, { color, sources: [pi] });
+          }
+        }
+      });
+      return { decisions, conflicts, errors };
+    }
+    function startMerge(patches) {
+      mergeOrigin = { cells: [...cells], version };
+      mergePatches = patches;
+      conflictChoices = new Map();
+      runMerge();
+    }
+    function runMerge() {
+      cells = [...mergeOrigin.cells];   // 合并失败后从原图案恢复重试
+      version = mergeOrigin.version;
+      try {
+        const result = computeMerge(mergePatches);
+        renderMergeDialog(result);
+      } catch (e) {
+        cells = [...mergeOrigin.cells];
+        document.querySelector("#mergeModal").hidden = false;
+        document.querySelector("#mergeInfo").textContent = "";
+        document.querySelector("#mergeErrors").innerHTML = '<span class="err">合并失败：' + e.message + '，已恢复原图案，可点击「恢复原图案并重试」。</span>';
+        document.querySelector("#mergeClean").innerHTML = "";
+        document.querySelector("#mergeConflicts").innerHTML = "";
+        document.querySelector("#mergeConfirmBtn").disabled = true;
+      }
+    }
+    function sourceLabel(s) { return s === "local" ? "本地当前" : "补丁" + (Number(s.slice(1)) + 1); }
+    function renderMergeDialog(result) {
+      const modal = document.querySelector("#mergeModal");
+      modal.hidden = false;
+      const cleanCount = result.decisions.size;
+      const conflictCount = result.conflicts.size;
+      const baseVersions = mergePatches.map(p => "v" + p.baseVersion).join("、");
+      document.querySelector("#mergeInfo").innerHTML =
+        '当前图案版本 <b>v' + version + '</b> · ' + mergePatches.length + ' 份补丁（基线 ' + baseVersions + '）· 自动并入 <b>' + cleanCount + '</b> 格，冲突 <b>' + conflictCount + '</b> 格';
+      document.querySelector("#mergeErrors").innerHTML = result.errors.length ? result.errors.map(e => '<div>· ' + e + '</div>').join("") : "";
+      document.querySelector("#mergeClean").innerHTML = cleanCount
+        ? [...result.decisions].map(([i, d]) => '格 ' + i + ' → 色' + d.color + '（' + d.sources.map(s => "补丁" + (s + 1)).join("、") + '）').join("；")
+        : '（无）';
+      const confBox = document.querySelector("#mergeConflicts");
+      confBox.innerHTML = "";
+      if (!conflictCount) confBox.innerHTML = '<p>无冲突，可直接确认并入。</p>';
+      [...result.conflicts.values()].forEach(c => {
+        const localChanged = c.baseColor !== null && cells[c.i] !== c.baseColor;
+        const unknown = c.baseColor === null;
+        const div = document.createElement("div");
+        div.className = "conflict";
+        const tag = unknown ? '<span class="tag unknown">基线版本未知，请手动选择</span>'
+                 : localChanged ? '<span class="tag">本地已改</span>'
+                 : '<span class="tag">两边都改</span>';
+        div.innerHTML = '<div>格 <b>' + c.i + '</b>（基线色 ' + (c.baseColor === null ? "未知" : "色" + c.baseColor) + '）' + tag + '</div>';
+        const cands = document.createElement("div");
+        cands.className = "cands";
+        [...c.candidates.entries()].forEach(([color, sources]) => {
+          const picked = conflictChoices.get(c.i) === color;
+          const btn = document.createElement("button");
+          btn.className = "cand" + (picked ? " picked" : "");
+          btn.innerHTML = '<span class="chip" style="background:' + colors[color] + '"></span>色' + color + ' · ' + [...sources].map(sourceLabel).join("、");
+          btn.onclick = () => { conflictChoices.set(c.i, color); renderMergeDialog(result); };
+          cands.appendChild(btn);
+        });
+        div.appendChild(cands);
+        confBox.appendChild(div);
+      });
+      document.querySelector("#mergeConfirmBtn").disabled = conflictChoices.size !== conflictCount;
+    }
+    function confirmMerge() {
+      const result = computeMerge(mergePatches);
+      if (conflictChoices.size !== result.conflicts.size) return;
+      snapshot();   // 整批合并只记一次撤销
+      result.decisions.forEach((d, i) => { cells[i] = d.color; });
+      result.conflicts.forEach((c, i) => { cells[i] = conflictChoices.get(i); });
+      bumpVersion();
+      const applied = result.decisions.size + result.conflicts.size;
+      document.querySelector("#mergeModal").hidden = true;
+      render();   // 色线用量、重复单元预览、断线风险全部按新图案重算
+      writeQueue([]);
+      patchStatus.innerHTML = '<span class="ok">已并入 ' + applied + ' 格（自动 ' + result.decisions.size + ' 格，冲突 ' + result.conflicts.size + ' 处），图案版本 v' + version + '。用量、预览与风险已重算，保存/导出按新图案。</span>';
+    }
     document.querySelectorAll("[data-block]").forEach(btn => btn.onclick = () => block = btn.dataset.block);
-    document.querySelector("#newBtn").onclick = () => { undo = []; redo = []; init(false); };
+    document.querySelector("#newBtn").onclick = () => { undo = []; redo = []; if (isOffline) { cells = Array(cols * rows).fill(0); baselineCells = [...cells]; render(); } else { init(false); bumpVersion(); render(); } };
     document.querySelector("#undoBtn").onclick = () => { if (!undo.length) return; redo.push([...cells]); cells = undo.pop(); render(); };
     document.querySelector("#redoBtn").onclick = () => { if (!redo.length) return; undo.push([...cells]); cells = redo.pop(); render(); };
-    document.querySelector("#saveBtn").onclick = () => localStorage.setItem("zfl31Pattern", JSON.stringify({ cols, rows, cells }));
+    document.querySelector("#saveBtn").onclick = () => localStorage.setItem(SAVE_KEY, JSON.stringify({ cols, rows, cells, version }));
     document.querySelector("#exportBtn").onclick = () => {
-      const data = { cols, rows, cells, usage: colors.map((color, i) => ({ color, count: cells.filter(v => v === i).length })) };
+      const data = { kind: "brocade-pattern", cols, rows, cells, version, usage: colors.map((color, i) => ({ color, count: cells.filter(v => v === i).length })) };
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "brocade-pattern.json"; a.click(); URL.revokeObjectURL(a.href);
+    };
+    document.querySelector("#sendOfflineBtn").onclick = () => {
+      try { localStorage.setItem(OFFLINE_KEY, JSON.stringify({ cols, rows, cells, version })); } catch (e) {}
+      const w = window.open(location.pathname + "?offline=1", "_blank");
+      if (!w) patchStatus.innerHTML = '<span class="err">弹窗被拦截，请允许弹出窗口后重试；图案已暂存，也可直接访问 ?offline=1。</span>';
+      else patchStatus.innerHTML = '<span class="ok">已送去断网工坊（基线 v' + version + '），在新标签页中修改后「传回主站」或「生成补丁文件」。</span>';
+    };
+    document.querySelector("#fetchPatchesBtn").onclick = () => {
+      const q = readQueue();
+      if (!q.length) { patchStatus.innerHTML = '没有待合并的补丁，请先在断网工坊「传回主站」或导入补丁文件。'; return; }
+      const valid = [], errs = [];
+      q.forEach((p, i) => { const e = validatePatch(p, i); if (e.length) errs.push(...e); else valid.push(p); });
+      if (errs.length) patchStatus.innerHTML = '<span class="err">' + errs.join("；") + '。</span>';
+      if (valid.length) startMerge(valid);
+    };
+    document.querySelector("#importPatchBtn").onclick = () => document.querySelector("#patchFile").click();
+    document.querySelector("#patchFile").onchange = async () => {
+      const files = document.querySelector("#patchFile").files;
+      const patches = []; const errs = [];
+      for (const f of files) {
+        try {
+          const p = JSON.parse(await f.text());
+          const e = validatePatch(p, patches.length);
+          if (e.length) errs.push(...e); else patches.push(p);
+        } catch (e) { errs.push(f.name + " 解析失败，已跳过"); }
+      }
+      document.querySelector("#patchFile").value = "";
+      if (errs.length) patchStatus.innerHTML = '<span class="err">' + errs.join("；") + '。</span>';
+      if (patches.length) startMerge(patches);
+    };
+    document.querySelector("#patchFileBtn").onclick = downloadPatch;
+    document.querySelector("#patchSendBtn").onclick = sendPatch;
+    document.querySelector("#mergeConfirmBtn").onclick = confirmMerge;
+    document.querySelector("#mergeRetryBtn").onclick = () => { conflictChoices = new Map(); runMerge(); };
+    document.querySelector("#mergeCancelBtn").onclick = () => {
+      document.querySelector("#mergeModal").hidden = true;
+      cells = [...mergeOrigin.cells]; version = mergeOrigin.version; render();
+      patchStatus.innerHTML = '已取消合并，恢复原图案（v' + version + '）。补丁仍在队列中，可重新取回。';
     };
     init();
   </script>
