@@ -11,6 +11,7 @@
     h1 { margin: 0; font-size: 26px; }
     button { border: 0; border-radius: 8px; padding: 10px 13px; background: #8d3e37; color: #fff; font-weight: 800; cursor: pointer; }
     button.secondary { background: #71675c; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
     input, select { width: 100%; border: 1px solid #d9cdbc; border-radius: 6px; padding: 9px; font: inherit; background: #fff; }
     label { display: block; margin: 9px 0 5px; color: #76695e; font-size: 13px; }
     .app { display: grid; grid-template-columns: 280px 1fr 320px; gap: 16px; padding: 16px; }
@@ -27,6 +28,11 @@
     .mini { aspect-ratio: 1; border-radius: 2px; }
     .toolbar { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     .warning { color: #a03a2e; font-weight: 800; }
+    #mergeStatus { font-size: 13px; color: #76695e; }
+    .conflict { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #e1d5c5; font-size: 13px; }
+    .conflict span { flex: 1; }
+    .opt { width: 26px; height: 26px; border-radius: 6px; border: 2px solid transparent; padding: 0; }
+    .opt.sel { border-color: #1f1b16; }
     @media (max-width: 1000px) { header { display: block; } .app { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -49,12 +55,25 @@
         <button data-block="cross" class="secondary">十字</button>
         <button data-block="diamond" class="secondary">小菱形</button>
       </div>
+      <h2>离线补丁</h2>
+      <div class="toolbar">
+        <button id="importBtn" class="secondary">导入图案/补丁</button>
+        <button id="patchBtn" class="secondary">导出补丁</button>
+      </div>
+      <input id="importFile" type="file" accept="application/json,.json" multiple hidden>
     </aside>
     <section class="panel"><div class="grid" id="grid"></div></section>
     <aside class="panel">
       <h2>操作</h2>
       <div class="toolbar"><button id="undoBtn" class="secondary">撤销</button><button id="redoBtn" class="secondary">重做</button></div>
       <p>点击填色，按住拖动可连续填色。</p>
+      <h2>补丁合并</h2>
+      <p id="mergeStatus">尚未导入补丁。</p>
+      <div id="conflicts"></div>
+      <div class="toolbar">
+        <button id="confirmMergeBtn" disabled>确认合并</button>
+        <button id="abortMergeBtn" class="secondary" disabled>恢复原图重试</button>
+      </div>
       <h2>用色统计</h2>
       <div class="stats" id="stats"></div>
       <h2>重复单元预览</h2>
@@ -70,13 +89,26 @@
     const stats = document.querySelector("#stats");
     const preview = document.querySelector("#preview");
     const risk = document.querySelector("#risk");
+    const mergeStatus = document.querySelector("#mergeStatus");
+    const conflictBox = document.querySelector("#conflicts");
     let cols = 18, rows = 14, active = 1, block = "dot", dragging = false;
     let cells = [];
     let undo = [], redo = [];
+    let version = 1, pid = newPid();
+    let baseCells = null, baseVersion = 1; // 上次保存/载入时的基线，用于导出补丁
+    let mergeSession = null;               // { backup, backupVer, conflicts: Map }
+    function newPid() { return Math.random().toString(36).slice(2, 8); }
     function init(loadSaved = true) {
       const saved = loadSaved && JSON.parse(localStorage.getItem("zfl31Pattern") || "null");
-      if (saved) { cols = saved.cols; rows = saved.rows; cells = saved.cells; }
-      else { cols = Number(document.querySelector("#cols").value); rows = Number(document.querySelector("#rows").value); cells = Array(cols * rows).fill(0); }
+      if (saved) {
+        cols = saved.cols; rows = saved.rows; cells = saved.cells;
+        version = saved.version || 1; pid = saved.pid || newPid();
+      } else {
+        cols = Number(document.querySelector("#cols").value); rows = Number(document.querySelector("#rows").value);
+        cells = Array(cols * rows).fill(0); version = 1; pid = newPid();
+      }
+      baseCells = [...cells]; baseVersion = version;
+      mergeSession = null;
       document.querySelector("#cols").value = cols; document.querySelector("#rows").value = rows;
       render();
     }
@@ -84,19 +116,29 @@
       palette.innerHTML = colors.map((c, i) => '<button class="swatch '+(i===active?'active':'')+'" data-color="'+i+'" style="background:'+c+'"></button>').join("");
       palette.querySelectorAll("[data-color]").forEach(el => el.onclick = () => { active = Number(el.dataset.color); render(); });
       grid.style.gridTemplateColumns = "repeat("+cols+", 1fr)";
-      grid.innerHTML = cells.map((v, i) => '<div class="cell" data-i="'+i+'" style="background:'+colors[v]+'"></div>').join("");
+      grid.innerHTML = cells.map((v, i) => {
+        const c = mergeSession && mergeSession.conflicts.get(i);
+        let style;
+        if (c && !c.chosen) style = "background:linear-gradient(135deg,"+colors[c.current]+" 0 50%,"+colors[c.incoming]+" 50% 100%);outline:2px dashed #a03a2e;outline-offset:-2px;";
+        else if (c) style = "background:"+colors[c.pick === "incoming" ? c.incoming : c.current]+";outline:2px solid #a03a2e;outline-offset:-2px;";
+        else style = "background:"+colors[v];
+        return '<div class="cell" data-i="'+i+'" style="'+style+'"></div>';
+      }).join("");
       grid.querySelectorAll(".cell").forEach(el => {
         el.onpointerdown = () => { dragging = true; paint(Number(el.dataset.i)); };
         el.onpointerenter = () => { if (dragging) paint(Number(el.dataset.i)); };
       });
       window.onpointerup = () => dragging = false;
       renderStats();
+      renderMerge();
     }
     function snapshot() { undo.push([...cells]); redo = []; if (undo.length > 50) undo.shift(); }
     function paint(i) {
+      if (mergeSession) { setMergeStatus("补丁合并待确认，请先确认合并或恢复原图，再继续绘制。"); return; }
       snapshot();
       const targets = pattern(i);
       targets.forEach(t => { if (t >= 0 && t < cells.length) cells[t] = active; });
+      version++;
       render();
     }
     function pattern(i) {
@@ -118,16 +160,149 @@
       }
       risk.innerHTML = riskRows.length ? '<p class="warning">第'+riskRows.join("、")+'行换色过密，可能断线。</p>' : '<p>暂无明显断线风险。</p>';
     }
+    function setMergeStatus(msg) { mergeStatus.textContent = msg; }
+    // 逐份并入补丁；版本相同走快速通道，否则逐格三方比对，冲突格各留一份待选
+    function applyPatch(p, n, session) {
+      const tag = "第" + (n + 1) + "份补丁";
+      if (!p || typeof p !== "object" || Array.isArray(p)) throw new Error(tag + "格式不正确");
+      if (!Number.isInteger(p.baseVersion)) throw new Error(tag + "缺少基线版本 baseVersion");
+      if (!Array.isArray(p.changes)) throw new Error(tag + "缺少改动格 changes");
+      if (Number.isInteger(p.cols) && Number.isInteger(p.rows) && (p.cols !== cols || p.rows !== rows))
+        throw new Error(tag + "网格尺寸与当前图案不符");
+      const fastPath = p.baseVersion === version && (!p.pid || p.pid === pid);
+      for (const ch of p.changes) {
+        if (!ch || !Number.isInteger(ch.i) || ch.i < 0 || ch.i >= cells.length) throw new Error(tag + "含越界改动格");
+        if (!Number.isInteger(ch.to) || ch.to < 0 || ch.to >= colors.length) throw new Error(tag + "含未知色线编号");
+        if (ch.from != null && (!Number.isInteger(ch.from) || ch.from < 0 || ch.from >= colors.length)) throw new Error(tag + "基线色线编号无效");
+        if (fastPath) { cells[ch.i] = ch.to; continue; }
+        const from = ch.from == null ? null : ch.from;
+        if (cells[ch.i] === ch.to) continue;                                 // 两边结果一致
+        if (from !== null && cells[ch.i] === from) { cells[ch.i] = ch.to; continue; } // 当前格未改，干净并入
+        const c = session.conflicts.get(ch.i);                               // 当前格已改或两边都改过
+        if (c) c.incoming = ch.to;                                           // 后来的补丁更新待选色
+        else session.conflicts.set(ch.i, { i: ch.i, current: cells[ch.i], incoming: ch.to, pick: "current", chosen: false });
+      }
+      version++;
+    }
+    function startMerge(patches) {
+      if (mergeSession) restoreMerge(false); // 已有未确认合并：先回原图再重试
+      const backup = [...cells], backupVer = version;
+      const session = { backup, backupVer, conflicts: new Map() };
+      try {
+        patches.forEach((p, n) => applyPatch(p, n, session));
+      } catch (e) {
+        cells = backup; version = backupVer; // 合并失败，从原图案恢复
+        mergeSession = null;
+        render();
+        setMergeStatus("合并失败：" + e.message + "。已从原图案恢复，可修正补丁后重新导入。");
+        return;
+      }
+      mergeSession = session;
+      render();
+      setMergeStatus(session.conflicts.size
+        ? "已并入补丁，" + session.conflicts.size + " 格存在冲突，请逐格选择后确认合并。"
+        : "补丁已全部干净并入，确认后生效。");
+    }
+    function confirmMerge() {
+      if (!mergeSession) return;
+      undo.push(mergeSession.backup); // 整批合并只留一次撤销
+      if (undo.length > 50) undo.shift();
+      redo = [];
+      mergeSession.conflicts.forEach(c => { cells[c.i] = c.pick === "incoming" ? c.incoming : c.current; });
+      version++;
+      mergeSession = null;
+      render();
+      setMergeStatus("合并已确认，用色统计、重复单元、断线风险与保存导出均按新图案计算。");
+    }
+    function restoreMerge(notify = true) {
+      if (!mergeSession) return;
+      cells = mergeSession.backup; version = mergeSession.backupVer;
+      mergeSession = null;
+      render();
+      if (notify) setMergeStatus("已从原图案恢复，可重新导入补丁重试。");
+    }
+    function renderMerge() {
+      document.querySelector("#confirmMergeBtn").disabled = !mergeSession;
+      document.querySelector("#abortMergeBtn").disabled = !mergeSession;
+      if (!mergeSession) { conflictBox.innerHTML = ""; return; }
+      if (!mergeSession.conflicts.size) { conflictBox.innerHTML = "<p>无冲突格。</p>"; return; }
+      conflictBox.innerHTML = [...mergeSession.conflicts.values()].map(c => {
+        const x = c.i % cols, y = Math.floor(c.i / cols);
+        return '<div class="conflict"><span>第'+(y+1)+'行第'+(x+1)+'格</span>' +
+          '<button class="opt'+(c.pick==="current"?" sel":"")+'" data-i="'+c.i+'" data-pick="current" style="background:'+colors[c.current]+'" title="保留当前色"></button>' +
+          '<button class="opt'+(c.pick==="incoming"?" sel":"")+'" data-i="'+c.i+'" data-pick="incoming" style="background:'+colors[c.incoming]+'" title="采用补丁色"></button></div>';
+      }).join("");
+      conflictBox.querySelectorAll(".opt").forEach(el => el.onclick = () => {
+        const c = mergeSession.conflicts.get(Number(el.dataset.i));
+        c.pick = el.dataset.pick; c.chosen = true;
+        render();
+      });
+    }
+    function loadPattern(d) {
+      if (!d || !Number.isInteger(d.cols) || !Number.isInteger(d.rows) || !Array.isArray(d.cells) || d.cells.length !== d.cols * d.rows)
+        throw new Error("图案数据不完整");
+      if (d.cells.some(v => !Number.isInteger(v) || v < 0 || v >= colors.length)) throw new Error("图案含未知色线编号");
+      snapshot();
+      cols = d.cols; rows = d.rows; cells = [...d.cells];
+      version = d.version || 1; pid = d.pid || newPid();
+      baseCells = [...cells]; baseVersion = version;
+      mergeSession = null;
+      document.querySelector("#cols").value = cols; document.querySelector("#rows").value = rows;
+      render();
+    }
+    function importFiles(files) {
+      const list = Array.from(files || []);
+      if (!list.length) return Promise.resolve();
+      return Promise.all(list.map(f => f.text().then(t => JSON.parse(t)))).then(parsed => {
+        const patches = [];
+        let loaded = false;
+        try {
+          for (const data of parsed) {
+            if (Array.isArray(data)) patches.push(...data);
+            else if (data && Array.isArray(data.cells)) { loadPattern(data); loaded = true; }
+            else patches.push(data);
+          }
+          if (patches.length) startMerge(patches);
+          else if (!loaded) setMergeStatus("文件中没有可识别的图案或补丁。");
+        } catch (e) { setMergeStatus("导入失败：" + e.message); }
+      }).catch(() => setMergeStatus("导入失败：文件不是有效的JSON。"));
+    }
+    function exportPatch() {
+      const changes = [];
+      for (let i = 0; i < cells.length; i++) if (cells[i] !== baseCells[i]) changes.push({ i, from: baseCells[i], to: cells[i] });
+      if (!changes.length) { setMergeStatus("当前图案相对基线没有改动，未生成补丁。"); return; }
+      download({ pid, baseVersion, cols, rows, changes }, "brocade-patch-v" + baseVersion + ".json");
+      setMergeStatus("已导出补丁：基线版本 v" + baseVersion + "，共 " + changes.length + " 格改动。");
+    }
+    function download(data, name) {
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click(); URL.revokeObjectURL(a.href);
+    }
     document.querySelectorAll("[data-block]").forEach(btn => btn.onclick = () => block = btn.dataset.block);
     document.querySelector("#newBtn").onclick = () => { undo = []; redo = []; init(false); };
-    document.querySelector("#undoBtn").onclick = () => { if (!undo.length) return; redo.push([...cells]); cells = undo.pop(); render(); };
-    document.querySelector("#redoBtn").onclick = () => { if (!redo.length) return; undo.push([...cells]); cells = redo.pop(); render(); };
-    document.querySelector("#saveBtn").onclick = () => localStorage.setItem("zfl31Pattern", JSON.stringify({ cols, rows, cells }));
-    document.querySelector("#exportBtn").onclick = () => {
-      const data = { cols, rows, cells, usage: colors.map((color, i) => ({ color, count: cells.filter(v => v === i).length })) };
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-      const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "brocade-pattern.json"; a.click(); URL.revokeObjectURL(a.href);
+    document.querySelector("#undoBtn").onclick = () => {
+      if (mergeSession) { setMergeStatus("补丁合并待确认，请先确认或恢复，再撤销。"); return; }
+      if (!undo.length) return;
+      redo.push([...cells]); cells = undo.pop(); version++; render();
     };
+    document.querySelector("#redoBtn").onclick = () => {
+      if (mergeSession) { setMergeStatus("补丁合并待确认，请先确认或恢复，再重做。"); return; }
+      if (!redo.length) return;
+      undo.push([...cells]); cells = redo.pop(); version++; render();
+    };
+    document.querySelector("#saveBtn").onclick = () => {
+      localStorage.setItem("zfl31Pattern", JSON.stringify({ cols, rows, cells, version, pid }));
+      baseCells = [...cells]; baseVersion = version;
+    };
+    document.querySelector("#exportBtn").onclick = () => {
+      const data = { version, pid, cols, rows, cells, usage: colors.map((color, i) => ({ color, count: cells.filter(v => v === i).length })) };
+      download(data, "brocade-pattern.json");
+    };
+    document.querySelector("#importBtn").onclick = () => document.querySelector("#importFile").click();
+    document.querySelector("#importFile").onchange = e => { importFiles(e.target.files); e.target.value = ""; };
+    document.querySelector("#patchBtn").onclick = exportPatch;
+    document.querySelector("#confirmMergeBtn").onclick = confirmMerge;
+    document.querySelector("#abortMergeBtn").onclick = () => restoreMerge(true);
     init();
   </script>
 </body>
